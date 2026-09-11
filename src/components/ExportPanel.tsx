@@ -1,6 +1,12 @@
 import { useState } from 'react'
 import { downloadBlob, exportComposite } from '../lib/export'
-import { exportAudio } from '../lib/audioExport'
+import {
+  AUDIO_GAINS,
+  ENCODE_STARTS_AT,
+  estimateAudioBytes,
+  exportAudio,
+  type AudioFormat,
+} from '../lib/audioExport'
 import { playRange, useProject } from '../store/useProject'
 import { formatSeconds, formatTime } from '../lib/format'
 import { ASPECT_SIZES } from '../lib/types'
@@ -26,6 +32,10 @@ export function ExportPanel({ refs }: { refs: VideoRefs }) {
   const [progress, setProgress] = useState(0)
   const [audioBusy, setAudioBusy] = useState(false)
   const [audioProgress, setAudioProgress] = useState(0)
+  const [audioFormat, setAudioFormat] = useState<AudioFormat>('wav')
+  const [audioGain, setAudioGain] = useState<number>(1)
+  /** MP3 編碼器要另外下載,那段沒有進度可報 */
+  const [audioStage, setAudioStage] = useState('')
   const [error, setError] = useState('')
   const [note, setNote] = useState('')
   /** 退回即時錄製的原因 —— 匯出還是成功了,所以不是 error */
@@ -37,14 +47,24 @@ export function ExportPanel({ refs }: { refs: VideoRefs }) {
     setAudioBusy(true)
     setError('')
     setAudioProgress(0)
+    setAudioStage(audioFormat === 'mp3' ? '準備 MP3 編碼器…' : '')
     try {
-      const { blob } = await exportAudio(setAudioProgress)
-      downloadBlob(blob, `dance-compare-${Date.now()}.wav`)
+      const { blob, extension } = await exportAudio({
+        format: audioFormat,
+        gain: audioGain,
+        onProgress: (r) => {
+          // 混音一開始回報進度,就代表編碼器已經載好了
+          setAudioStage('')
+          setAudioProgress(r)
+        },
+      })
+      downloadBlob(blob, `dance-compare-${Date.now()}.${extension}`)
     } catch (err) {
       setError(err instanceof Error ? err.message : '音訊匯出失敗')
     } finally {
       setAudioBusy(false)
       setAudioProgress(0)
+      setAudioStage('')
     }
   }
 
@@ -142,18 +162,61 @@ export function ExportPanel({ refs }: { refs: VideoRefs }) {
       {warn && <p className="text-[11px] leading-relaxed text-amber-300">{warn}</p>}
       {error && <p className="text-[11px] text-red-400">{error}</p>}
 
-      <div className="border-t border-white/10 pt-2">
+      <div className="space-y-2 border-t border-white/10 pt-2">
+        {/*
+          音量與格式都用按鈕組而不是 select:四個和兩個選項一眼就看完,
+          點一下就切,不用先打開再挑。active 樣式跟播放列的速度按鈕一致。
+        */}
+        <Field label="音訊音量">
+          <div className="grid grid-cols-4 gap-1">
+            {AUDIO_GAINS.map((g) => (
+              <Button
+                key={g}
+                active={audioGain === g}
+                disabled={audioBusy}
+                onClick={() => setAudioGain(g)}
+              >
+                {Math.round(g * 100)}%
+              </Button>
+            ))}
+          </div>
+        </Field>
+
+        <Field label="音訊格式">
+          <div className="grid grid-cols-2 gap-1">
+            {(['wav', 'mp3'] as const).map((f) => (
+              <Button
+                key={f}
+                active={audioFormat === f}
+                disabled={audioBusy}
+                onClick={() => setAudioFormat(f)}
+              >
+                {f.toUpperCase()}
+              </Button>
+            ))}
+          </div>
+        </Field>
+
         <Button
           className="w-full"
           disabled={durationMs <= 0 || busy || audioBusy}
           onClick={() => void runAudio()}
         >
-          {audioBusy ? `混音中 ${(audioProgress * 100).toFixed(0)}%` : '只匯出音訊(WAV)'}
+          {audioBusy
+            ? audioStage ||
+              (audioProgress >= ENCODE_STARTS_AT
+                ? `編碼 ${audioFormat.toUpperCase()} 中…`
+                : `混音中 ${(audioProgress * 100).toFixed(0)}%`)
+            : `只匯出音訊(${audioFormat.toUpperCase()})`}
         </Button>
-        <p className="mt-1.5 text-[11px] leading-relaxed text-white/35">
-          預備拍 + 歌曲,不含畫面。走離線混音,幾秒就好,
-          而且不需要一直開著畫面。未壓縮,{formatSeconds(range.durationMs)} 約{' '}
-          {Math.round((range.durationMs / 1000) * 44100 * 2 * 2 / 1048576)} MB。
+        <p className="text-[11px] leading-relaxed text-white/35">
+          預備拍 + 歌曲,不含畫面。走離線混音,幾秒就好,而且不需要一直開著畫面。
+          {audioFormat === 'wav' ? '未壓縮' : 'MP3 192kbps'},
+          {formatSeconds(range.durationMs)} 約{' '}
+          {(estimateAudioBytes(range.durationMs, audioFormat) / 1048576).toFixed(
+            audioFormat === 'wav' ? 0 : 1,
+          )}{' '}
+          MB。音量 {Math.round(audioGain * 100)}% 會套在整段混音上,素材與預備拍一起縮。
         </p>
       </div>
 
