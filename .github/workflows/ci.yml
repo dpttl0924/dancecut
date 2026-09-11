@@ -1,0 +1,35 @@
+# Vercel 部署時只會跑 `npm run build`(= tsc -b && vite build),
+# 所以型別錯誤擋得住部署,但測試與 lint 完全沒有人跑 ——
+# 測試壞掉照樣會上線。這個 workflow 補的就是那一段。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 22 是目前的 LTS,也符合 Vite 8 的最低需求(20.19+ / 22.12+)
+          node-version: '22'
+          cache: npm
+
+      # ci 而不是 install:嚴格照 package-lock.json 安裝,
+      # 本地能跑但 lockfile 沒更新的情況會在這裡被抓到
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      # build 本身就含 `tsc -b`,所以型別檢查不需要另外跑一次
+      - name: Build
+        run: npm run build

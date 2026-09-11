@@ -1,7 +1,12 @@
 # 舞蹈影片對比
 
+**[▶ 線上試用 countoff.vercel.app](https://countoff.vercel.app/)**
+· [程式結構說明](docs/ARCHITECTURE.md)
+
+[![CI](https://github.com/dpttl0924/-app/actions/workflows/ci.yml/badge.svg)](https://github.com/dpttl0924/-app/actions/workflows/ci.yml)
+
 跟著 KPOP 影片練舞之後,把自己的錄影和參考影片並排比對的工具。
-純前端,影片不上傳、不離開瀏覽器。
+純前端,影片不上傳、不離開瀏覽器 —— 沒有後端,連檔案都沒送出去過。
 
 這是「KPOP 舞蹈動作比對」的第一階段 —— 先把影片對比與標註做扎實,
 第二階段才接 MediaPipe 姿態偵測與 DTW 動作比對。
@@ -33,7 +38,8 @@
 - **匯出**:WebCodecs 離線編碼,影格直接從檔案解碼,**不必即時播放** ——
   三分鐘的影片不用等三分鐘,也不受「切到其他 App 就錄到空白」的限制。
   輸出 MP4 或 WebM(視瀏覽器支援),編不出來時自動退回 MediaRecorder 即時錄製。
-  另有純音訊輸出(WAV)
+- **純音訊輸出**:WAV 或 MP3(192kbps),音量可選 25 / 50 / 75 / 100%。
+  瀏覽器的 WebCodecs 沒有 MP3 編碼器,所以 MP3 走 LAME 的 WASM 版,只在選了 MP3 才載入
 
 ## 開始
 
@@ -46,10 +52,18 @@ npm run dev
 | --- | --- |
 | `npm run dev` | 開發伺服器 |
 | `npm run build` | 型別檢查 + 打包 |
-| `npm test` | 音訊對齊的單元測試 |
+| `npm test` | 單元測試(16 個檔案 239 個測試,見[測試地圖](docs/ARCHITECTURE.md)) |
 | `npm run lint` | oxlint |
 
+部署在 Vercel,推上 `main` 就自動上線。
+Vercel 只跑 `npm run build`,所以測試與 lint 由 GitHub Actions 補(`.github/workflows/ci.yml`)——
+沒有這一段的話,測試壞掉照樣會部署成功。
+
 ## 架構
+
+> 這一節講**為什麼這樣設計**。要找「某個功能在哪個檔案、哪一行」,
+> 看 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) —— 那份是逐檔的程式地圖。
+
 
 ```
 src/
@@ -65,6 +79,7 @@ src/
     tempo.ts       BPM 與重拍相位偵測
     metronome.ts   預備拍的 click 合成
     audioExport.ts OfflineAudioContext 離線混音(影片與純音訊匯出共用)
+    mp3Export.ts   MP3 編碼(LAME WASM,動態載入)
     export.ts      MediaRecorder 即時錄製 —— 只在 WebCodecs 走不通時當退路
     webcodecs/
       capabilities.ts  這台裝置編得出什麼格式
