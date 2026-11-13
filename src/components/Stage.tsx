@@ -357,6 +357,9 @@ interface ClipLayerProps {
 }
 
 function ClipLayer({ clip, videoRef, mode, size, style, cropping }: ClipLayerProps) {
+  // 預覽優先用低解析的代理檔;即時錄製匯出時暫時換回原檔(見 store 的 previewOriginal)。
+  // 裁切是 0..1 的比例、layout 從 source 現量尺寸,所以換解析度不影響畫面位置。
+  const previewOriginal = useProject((s) => s.previewOriginal)
   if (!clip) return null
   const slot = slotRect(mode, clip.id, size)
   const audioOnly = isAudioOnly(clip)
@@ -413,7 +416,7 @@ function ClipLayer({ clip, videoRef, mode, size, style, cropping }: ClipLayerPro
           */}
           <video
             ref={videoRef}
-            src={clip.url}
+            src={previewOriginal ? clip.url : (clip.previewUrl ?? clip.url)}
             playsInline
             preload="auto"
             className={`pointer-events-none absolute ${audioOnly ? 'invisible' : ''}`}

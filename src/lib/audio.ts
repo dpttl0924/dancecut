@@ -80,45 +80,129 @@ function getDecodeContext(): OfflineAudioContext {
   return sharedCtx
 }
 
-/** 從影片/音訊檔抽出包絡。丟不出音軌會 throw。 */
+/**
+ * 超過這個大小就不走 decodeAudioData,直接串流解碼。
+ *
+ * decodeAudioData 只吃完整的 ArrayBuffer —— 整支檔案得先整個讀進記憶體。
+ * iPhone 錄的 3 分鐘影片動輒 300MB~1GB(4K 更大),在 iPad / iPhone 上
+ * `file.arrayBuffer()` 本身就可能失敗,或把分頁擠到被回收。
+ * 串流路徑(mediabunny)只讀音軌的那幾塊,記憶體跟檔案大小無關。
+ *
+ * 小檔案還是先走 decodeAudioData:不必為了它下載 mediabunny。
+ */
+const DIRECT_DECODE_LIMIT = 150 * 1024 * 1024
+
+/**
+ * 從影片/音訊檔抽出包絡。所有路徑都失敗才 throw,錯誤訊息會列出每條路徑失敗的原因。
+ *
+ * 兩條路徑:
+ *   1. decodeAudioData:快、不用額外載入東西,但要整檔進記憶體,
+ *      而且遇到「多條音軌」的檔案(iPhone 開空間音訊錄的 .mov 會帶 APAC 軌)可能直接拒絕。
+ *   2. mediabunny 串流:逐塊解封裝 + WebCodecs AudioDecoder,自己挑第一條解得開的音軌。
+ */
 export async function analyzeAudio(file: Blob): Promise<AudioAnalysis> {
+  const failures: string[] = []
+
+  if (file.size <= DIRECT_DECODE_LIMIT) {
+    try {
+      return await analyzeWithDecodeAudioData(file)
+    } catch (err) {
+      failures.push(`decodeAudioData:${describeError(err)}`)
+    }
+  }
+
+  try {
+    const { analyzeAudioStreaming } = await import('./audioStream')
+    return await analyzeAudioStreaming(file)
+  } catch (err) {
+    failures.push(`串流解碼:${describeError(err)}`)
+  }
+
+  throw new Error(failures.join(';'))
+}
+
+function describeError(err: unknown): string {
+  if (err instanceof Error) return err.message || err.name
+  return String(err)
+}
+
+async function analyzeWithDecodeAudioData(file: Blob): Promise<AudioAnalysis> {
   const bytes = await file.arrayBuffer()
   const audio = await getDecodeContext().decodeAudioData(bytes)
 
-  const sr = audio.sampleRate
-  const frames = audio.length
-  const channels = audio.numberOfChannels
-  const hop = Math.max(1, Math.round(sr / ENVELOPE_HZ))
-  const buckets = Math.floor(frames / hop)
-  if (buckets < 2) throw new Error('音訊太短,無法分析')
+  const acc = new EnvelopeAccumulator(audio.sampleRate)
+  const planes: Float32Array[] = []
+  for (let c = 0; c < audio.numberOfChannels; c++) planes.push(audio.getChannelData(c))
+  acc.push(planes, audio.length)
+  return acc.finish()
+}
 
-  const data: Float32Array[] = []
-  for (let c = 0; c < channels; c++) data.push(audio.getChannelData(c))
+/**
+ * 邊收 PCM 邊算包絡。兩條解碼路徑共用 —— 一次拿到整段(decodeAudioData)
+ * 或一塊一塊來(串流)都走這裡,包絡才不會因為解碼方式不同而有差異。
+ *
+ * 每個 hop(1/ENVELOPE_HZ 秒)取混成單聲道後的 RMS。
+ * 不足一個 hop 的尾巴丟掉,與舊版行為一致。
+ */
+export class EnvelopeAccumulator {
+  private readonly hop: number
+  private buf = new Float32Array(1024)
+  private count = 0
+  private sum = 0
+  private filled = 0
+  /** 目前已收到的總 frame 數(含補的靜音),串流路徑靠它處理時間戳的空洞與重疊 */
+  position = 0
 
-  // 每個 hop 取 RMS,順便混成單聲道
-  const envelope = new Float32Array(buckets)
-  for (let i = 0; i < buckets; i++) {
-    const start = i * hop
-    let sum = 0
-    for (let j = 0; j < hop; j++) {
+  constructor(sampleRate: number) {
+    this.hop = Math.max(1, Math.round(sampleRate / ENVELOPE_HZ))
+  }
+
+  /** planes:每個聲道一條,長度至少 frames */
+  push(planes: Float32Array[], frames: number, from = 0): void {
+    const channels = planes.length
+    if (channels === 0) return
+    for (let j = from; j < frames; j++) {
       let s = 0
-      for (let c = 0; c < channels; c++) s += data[c][start + j]
+      for (let c = 0; c < channels; c++) s += planes[c][j]
       s /= channels
-      sum += s * s
+      this.addSquare(s * s)
     }
-    envelope[i] = Math.sqrt(sum / hop)
+    this.position += frames - from
   }
 
-  // 對數壓縮後取正向差分 = 起音強度
-  const onset = new Float32Array(buckets)
-  let prev = Math.log1p(envelope[0] * 50)
-  for (let i = 1; i < buckets; i++) {
-    const cur = Math.log1p(envelope[i] * 50)
-    onset[i] = Math.max(0, cur - prev)
-    prev = cur
+  pushSilence(frames: number): void {
+    for (let j = 0; j < frames; j++) this.addSquare(0)
+    this.position += frames
   }
 
-  return { envelope, onset }
+  private addSquare(v: number): void {
+    this.sum += v
+    if (++this.filled < this.hop) return
+    if (this.count === this.buf.length) {
+      const next = new Float32Array(this.buf.length * 2)
+      next.set(this.buf)
+      this.buf = next
+    }
+    this.buf[this.count++] = Math.sqrt(this.sum / this.hop)
+    this.sum = 0
+    this.filled = 0
+  }
+
+  finish(): AudioAnalysis {
+    const buckets = this.count
+    if (buckets < 2) throw new Error('音訊太短,無法分析')
+    const envelope = this.buf.slice(0, buckets)
+
+    // 對數壓縮後取正向差分 = 起音強度
+    const onset = new Float32Array(buckets)
+    let prev = Math.log1p(envelope[0] * 50)
+    for (let i = 1; i < buckets; i++) {
+      const cur = Math.log1p(envelope[i] * 50)
+      onset[i] = Math.max(0, cur - prev)
+      prev = cur
+    }
+    return { envelope, onset }
+  }
 }
 
 /** 減平均、除標準差。互相關前一定要做,否則直流成分會蓋掉真正的峰值。 */

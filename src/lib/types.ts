@@ -71,7 +71,13 @@ export const MIN_CROP = 0.05
 
 export interface Clip {
   id: ClipId
+  /** 原檔。匯出、音訊分析、格率量測都讀這個 */
   url: string
+  /**
+   * 預覽用的低解析代理檔(見 proxyPolicy.ts)。只有畫面上的 `<video>` 用它,
+   * 匯出一律讀原檔。null / 沒有 = 還沒轉好或不需要,預覽直接用原檔。
+   */
+  previewUrl?: string | null
   name: string
   /** 影片本身長度 */
   durationMs: number

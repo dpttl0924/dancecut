@@ -5,6 +5,7 @@ import { playbackClock } from '../lib/playbackClock'
 import { DEFAULT_FPS, measureClipFps } from '../lib/frameRate'
 import { projectToContent, type TimelineMap } from '../lib/timeline'
 import { describeLoadFailure } from '../lib/mediaSupport'
+import { needsProxy } from '../lib/proxyPolicy'
 import { MAX_BPM, MIN_BPM, MIN_CONFIDENCE, detectTempo, type TempoEstimate } from '../lib/tempo'
 import {
   ASPECT_SIZES,
@@ -31,6 +32,31 @@ interface AlignState {
 }
 
 const IDLE_ALIGN: AlignState = { status: 'idle', message: '', alternativeLagMs: null }
+
+export type ProxyStatus = 'none' | 'queued' | 'running' | 'ready' | 'error'
+
+export interface ProxyState {
+  status: ProxyStatus
+  /** 0..1,只有 running 時有意義 */
+  progress: number
+  /** error 時的原因,可以直接顯示 */
+  message: string
+}
+
+const NO_PROXY: ProxyState = { status: 'none', progress: 0, message: '' }
+
+/**
+ * 代理檔一次只轉一支。兩支同時轉等於同時解兩支 4K 再編兩次,
+ * 正是這個功能要解決的負擔,而且轉檔期間預覽還在用原檔播。
+ */
+let proxyQueue: Promise<void> = Promise.resolve()
+const proxyAborts: Partial<Record<ClipId, AbortController>> = {}
+
+function cancelProxy(id: ClipId, clip: Clip | null) {
+  proxyAborts[id]?.abort()
+  delete proxyAborts[id]
+  if (clip?.previewUrl) URL.revokeObjectURL(clip.previewUrl)
+}
 
 /** score 低於這個值,兩段音訊大概不是同一首歌 */
 const MIN_SCORE = 0.4
@@ -101,6 +127,14 @@ interface ProjectState {
    * 也不知道換小一點的影片就會好。
    */
   syncStrained: boolean
+  /** 每支素材的預覽代理檔進度 */
+  proxy: Record<ClipId, ProxyState>
+  /**
+   * 暫時讓預覽改回原檔。即時錄製的匯出是直接錄畫面上的 `<video>`,
+   * 那時候一定要是原檔,否則會錄出 540p 的影片。
+   */
+  previewOriginal: boolean
+  setPreviewOriginal: (v: boolean) => void
 
   loadClip: (id: ClipId, file: File) => Promise<void>
   removeClip: (id: ClipId) => void
@@ -337,9 +371,13 @@ export const useProject = create<ProjectState>()((set, get) => ({
   align: IDLE_ALIGN,
   loading: null,
   syncStrained: false,
+  proxy: { a: NO_PROXY, b: NO_PROXY },
+  previewOriginal: false,
+  setPreviewOriginal: (previewOriginal) => set({ previewOriginal }),
 
   async loadClip(id, file) {
     const prev = get().clips[id]
+    cancelProxy(id, prev)
     if (prev) URL.revokeObjectURL(prev.url)
 
     const sizeMb = file.size / 1048576
@@ -371,8 +409,16 @@ export const useProject = create<ProjectState>()((set, get) => ({
           ...withDuration({ ...s, clips }),
           loading: null,
           syncStrained: false,
+          proxy: {
+            ...s.proxy,
+            [id]: needsProxy(meta.width, meta.height)
+              ? { status: 'queued', progress: 0, message: '' }
+              : NO_PROXY,
+          },
         }
       })
+
+      if (needsProxy(meta.width, meta.height)) scheduleProxy(id, file, url)
 
       /*
         格率背景實測。不擋 UI —— 量測要真的播一小段(見 frameRate.ts),
@@ -397,11 +443,14 @@ export const useProject = create<ProjectState>()((set, get) => ({
           if (!cur || cur.url !== url) return s // 中途被換掉了
           return { clips: { ...s.clips, [id]: { ...cur, envelope, onset } } }
         })
-      } catch {
+      } catch (err) {
+        // 原因一定要帶出來:「沒有音軌」和「瀏覽器解不開這種編碼」的處理方式完全不同
+        const reason = err instanceof Error && err.message ? `(${err.message})` : ''
+        console.warn(`[audio] ${file.name} 音訊分析失敗`, err)
         set({
           align: {
             status: 'error',
-            message: `${file.name} 沒有可解碼的音軌,無法自動對齊`,
+            message: `${file.name} 的音軌無法解碼,無法自動對齊${reason}`,
             alternativeLagMs: null,
           },
         })
@@ -415,11 +464,13 @@ export const useProject = create<ProjectState>()((set, get) => ({
 
   removeClip(id) {
     const prev = get().clips[id]
+    cancelProxy(id, prev)
     if (prev) URL.revokeObjectURL(prev.url)
     set((s) => {
       const clips = { ...s.clips, [id]: null }
       return {
         clips,
+        proxy: { ...s.proxy, [id]: NO_PROXY },
         ...withDuration({ ...s, clips }),
         playing: false,
         align: IDLE_ALIGN,
@@ -775,3 +826,57 @@ export const useProject = create<ProjectState>()((set, get) => ({
     get().setOffset('b', lagMs > 0 ? lagMs : 0)
   },
 }))
+
+/**
+ * 背景轉代理檔,轉好就把預覽切過去。
+ *
+ * 每一步都要確認素材還是同一支(url 沒變):轉檔要幾十秒,
+ * 中途被換掉或移除的話,遲到的結果不能蓋上去。
+ */
+function scheduleProxy(id: ClipId, file: File, url: string) {
+  const ctrl = new AbortController()
+  proxyAborts[id] = ctrl
+  const stillCurrent = () => !ctrl.signal.aborted && useProject.getState().clips[id]?.url === url
+  const setProxy = (p: ProxyState) =>
+    useProject.setState((s) => ({ proxy: { ...s.proxy, [id]: p } }))
+
+  proxyQueue = proxyQueue.then(async () => {
+    if (!stillCurrent()) return
+    setProxy({ status: 'running', progress: 0, message: '' })
+    try {
+      const { buildProxy } = await import('../lib/proxy')
+      let lastReport = 0
+      const blob = await buildProxy(file, {
+        signal: ctrl.signal,
+        onProgress: (p) => {
+          // 進度回呼很密,節流成 1% 一跳,免得整棵樹一直重繪
+          if (p - lastReport < 0.01 || !stillCurrent()) return
+          lastReport = p
+          setProxy({ status: 'running', progress: p, message: '' })
+        },
+      })
+      if (!stillCurrent()) return
+      const previewUrl = URL.createObjectURL(blob)
+      useProject.setState((s) => {
+        const cur = s.clips[id]
+        if (!cur || cur.url !== url) {
+          URL.revokeObjectURL(previewUrl)
+          return s
+        }
+        return {
+          clips: { ...s.clips, [id]: { ...cur, previewUrl } },
+          proxy: { ...s.proxy, [id]: { status: 'ready', progress: 1, message: '' } },
+          // 換成輕量的代理檔後,之前「追不上」的判定不再成立
+          syncStrained: false,
+        }
+      })
+    } catch (err) {
+      if (!stillCurrent()) return
+      const message = err instanceof Error ? err.message : String(err)
+      console.warn(`[proxy] ${file.name} 代理檔失敗,繼續用原檔預覽`, err)
+      setProxy({ status: 'error', progress: 0, message })
+    } finally {
+      if (proxyAborts[id] === ctrl) delete proxyAborts[id]
+    }
+  })
+}

@@ -104,6 +104,10 @@ export function usePlaybackEngine(refs: VideoRefs) {
           continue
         }
 
+        // 還在載入(例如剛從原檔換成代理檔)或上一個 seek 還沒完成時,量到的誤差不可信。
+        // 這時候再 seek 只會讓解碼器一直重來,還會被誤判成「裝置追不上」。
+        if (el.readyState < 2 || el.seeking) continue
+
         // 靜音的那支可以用大一點的修正幅度,反正沒有聲音會被聽出來
         const maxTrim = clip.volume > 0.01 ? AUDIBLE_MAX_TRIM : MUTED_MAX_TRIM
         const correction = correctDrift(targetSec - el.currentTime, rate, maxTrim)

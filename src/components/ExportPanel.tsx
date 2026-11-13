@@ -106,6 +106,8 @@ export function ExportPanel({ refs }: { refs: VideoRefs }) {
       const reason = err instanceof Error ? err.message : '未知原因'
       setWarn(`${reason}。改用即時錄製,需要一直開著這個畫面到跑完。`)
       try {
+        // 即時錄製錄的是畫面上的 <video>,預覽若在用代理檔就會錄出 540p —— 先換回原檔
+        await switchToOriginal(refs)
         const { blob, extension } = await exportComposite({
           videos: { a: refs.a.current, b: refs.b.current },
           scale,
@@ -115,6 +117,8 @@ export function ExportPanel({ refs }: { refs: VideoRefs }) {
         downloadBlob(blob, `dance-compare-${Date.now()}.${extension}`)
       } catch (fallbackErr) {
         setError(fallbackErr instanceof Error ? fallbackErr.message : '匯出失敗')
+      } finally {
+        useProject.getState().setPreviewOriginal(false)
       }
     } finally {
       setBusy(false)
@@ -227,5 +231,35 @@ export function ExportPanel({ refs }: { refs: VideoRefs }) {
         (輸出長度 {formatTime(range.durationMs)})。
       </p>
     </Panel>
+  )
+}
+
+/**
+ * 讓預覽換回原檔,並等兩支 <video> 都載入到有畫面為止。
+ * 沒有任何代理檔時直接返回,不必重新載入。
+ */
+async function switchToOriginal(refs: VideoRefs) {
+  const { clips, setPreviewOriginal } = useProject.getState()
+  if (!clips.a?.previewUrl && !clips.b?.previewUrl) return
+  setPreviewOriginal(true)
+  // 等 React 把 src 換掉
+  await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
+  await Promise.all(
+    (['a', 'b'] as const).map((id) => {
+      const el = refs[id].current
+      const clip = clips[id]
+      if (!el || !clip) return
+      return new Promise<void>((resolve) => {
+        const done = () => {
+          clearTimeout(timer)
+          el.removeEventListener('loadeddata', done)
+          resolve()
+        }
+        // 拿不到事件也不要卡死,匯出本身會再處理還沒就緒的畫面
+        const timer = setTimeout(done, 10_000)
+        if (el.src === clip.url && el.readyState >= 2) done()
+        else el.addEventListener('loadeddata', done)
+      })
+    }),
   )
 }

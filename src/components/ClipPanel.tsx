@@ -18,6 +18,7 @@ const ZOOM_STEP = 1.1
 export function ClipPanel({ id }: { id: ClipId }) {
   const clip = useProject((s) => s.clips[id])
   const loading = useProject((s) => s.loading)
+  const proxy = useProject((s) => s.proxy[id])
   const adjusting = useProject((s) => s.adjustTarget === id)
   const setAdjustTarget = useProject((s) => s.setAdjustTarget)
   const cropping = useProject((s) => s.cropTarget === id)
@@ -108,6 +109,7 @@ export function ClipPanel({ id }: { id: ClipId }) {
               {formatTime(clip.durationMs)}
               {clip.envelope ? ' · 音訊已分析' : ' · 音訊分析中…'}
             </div>
+            <ProxyStatus status={proxy.status} progress={proxy.progress} message={proxy.message} />
           </div>
 
           <Field label={`時間偏移 ${formatSeconds(clip.offsetMs)}`}>
@@ -254,4 +256,29 @@ export function ClipPanel({ id }: { id: ClipId }) {
       {error && <p className="text-[11px] text-red-400">{error}</p>}
     </Panel>
   )
+}
+
+/**
+ * 預覽代理檔的狀態。轉檔要幾十秒,不講的話使用者不知道為什麼一開始會頓、
+ * 過一陣子又突然變順。
+ */
+function ProxyStatus({
+  status,
+  progress,
+  message,
+}: {
+  status: 'none' | 'queued' | 'running' | 'ready' | 'error'
+  progress: number
+  message: string
+}) {
+  if (status === 'none') return null
+  if (status === 'queued') return <div className="text-white/40">預覽版排隊中(轉好前用原檔預覽)</div>
+  if (status === 'running')
+    return (
+      <div className="text-amber-300/80">
+        製作預覽版 {Math.round(progress * 100)}%(轉好前用原檔預覽)
+      </div>
+    )
+  if (status === 'ready') return <div className="text-emerald-300/80">預覽使用 540p 預覽版 · 匯出仍用原檔</div>
+  return <div className="text-white/40" title={message}>預覽版製作失敗,用原檔預覽({message})</div>
 }
