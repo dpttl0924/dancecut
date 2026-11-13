@@ -193,6 +193,26 @@ function setRate(el: HTMLVideoElement, value: number) {
   if (Math.abs(el.playbackRate - value) > 0.002) el.playbackRate = value
 }
 
-function setVolume(el: HTMLVideoElement, value: number) {
-  if (Math.abs(el.volume - value) > 0.01) el.volume = value
+/**
+ * 音量 0 的那支一定要設 `muted`,不能只把 volume 調成 0。
+ *
+ * iPhone / iPad 的 Safari 會忽略 `el.volume`(唯讀,永遠是 1),
+ * 所以「B 預設靜音」在 iOS 上其實是兩支都有聲音在播。
+ * 而 iOS 的 WebKit 不允許兩支有聲音的影片同時播放 —— 一支開始播就把另一支暫停,
+ * 播放引擎下一幀又把被暫停的叫回來,兩支互相搶,畫面就一直頓。
+ * 實際症狀:mp4 單獨播很順,跟 mov 一起放就卡。
+ * `muted` 在 iOS 上是有效的,靜音的影片不受這個限制。
+ *
+ * 只記上次寫入的值:iOS 上 el.volume 讀回來永遠是 1,用它比對的話會每幀都寫一次。
+ */
+const lastVolume = new WeakMap<HTMLVideoElement, number>()
+
+export function setVolume(el: HTMLVideoElement, value: number) {
+  const mute = value < 0.01
+  if (el.muted !== mute) el.muted = mute
+  if (mute) return
+  const last = lastVolume.get(el)
+  if (last !== undefined && Math.abs(last - value) <= 0.01) return
+  el.volume = value
+  lastVolume.set(el, value)
 }

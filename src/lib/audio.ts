@@ -264,14 +264,10 @@ function prefixSums(src: Float32Array) {
 const PEAK_SEPARATION = ENVELOPE_HZ
 
 /**
- * 算出 B 相對於 A 的時間偏移。
- * @param maxLagMs 只在這個範圍內找,預設 ±60 秒。範圍越小越不容易被雜訊騙。
+ * 每個候選位移在重疊區上的 Pearson 相關係數(起音序列)。
+ * 回傳的 lags 單位是包絡格數(1/ENVELOPE_HZ 秒)。
  */
-export function alignOnsets(
-  onsetA: Float32Array,
-  onsetB: Float32Array,
-  maxLagMs = 60_000,
-): AlignResult {
+function scoreAllLags(onsetA: Float32Array, onsetB: Float32Array, maxLagMs: number) {
   const a = standardize(onsetA)
   const b = standardize(onsetB)
   const corr = crossCorrelate(a, b)
@@ -317,34 +313,171 @@ export function alignOnsets(
   }
 
   if (lags.length === 0) throw new Error('兩段影片重疊太少,無法對齊')
+  return { lags, scores }
+}
 
-  let bestIdx = 0
-  for (let i = 1; i < scores.length; i++) if (scores[i] > scores[bestIdx]) bestIdx = i
-  const bestLag = lags[bestIdx]
-  const bestScore = scores[bestIdx]
-
-  let runnerUp = -Infinity
-  let runnerUpLag = 0
-  for (let i = 0; i < scores.length; i++) {
-    if (Math.abs(lags[i] - bestLag) > PEAK_SEPARATION && scores[i] > runnerUp) {
-      runnerUp = scores[i]
-      runnerUpLag = lags[i]
+/** 由高到低挑出彼此相隔超過 PEAK_SEPARATION 的峰值(回傳索引) */
+function topPeaks(lags: number[], scores: number[], count: number): number[] {
+  const order = scores.map((_, i) => i).sort((x, y) => scores[y] - scores[x])
+  const picked: number[] = []
+  for (const i of order) {
+    if (picked.every((j) => Math.abs(lags[i] - lags[j]) > PEAK_SEPARATION)) {
+      picked.push(i)
+      if (picked.length === count) break
     }
   }
-  if (runnerUp === -Infinity) {
-    // 搜尋範圍太窄,只有一個峰,無從比較
-    runnerUp = 0
-    runnerUpLag = 0
-  }
+  return picked
+}
 
-  const margin = bestScore > 0 ? (bestScore - runnerUp) / bestScore : 0
-
+function buildResult(
+  bestLag: number,
+  bestScore: number,
+  runnerUpLag: number | null,
+  runnerUpScore: number,
+  margin: number,
+): AlignResult {
   return {
     lagMs: (bestLag * 1000) / ENVELOPE_HZ,
     score: bestScore,
-    runnerUpScore: runnerUp,
-    runnerUpLagMs: (runnerUpLag * 1000) / ENVELOPE_HZ,
+    runnerUpScore,
+    runnerUpLagMs: ((runnerUpLag ?? 0) * 1000) / ENVELOPE_HZ,
     margin,
     hasAlternative: margin < ALTERNATIVE_THRESHOLD,
   }
+}
+
+/**
+ * 只看起音序列,算出 B 相對於 A 的時間偏移。
+ * @param maxLagMs 只在這個範圍內找,預設 ±60 秒。範圍越小越不容易被雜訊騙。
+ */
+export function alignOnsets(
+  onsetA: Float32Array,
+  onsetB: Float32Array,
+  maxLagMs = 60_000,
+): AlignResult {
+  const { lags, scores } = scoreAllLags(onsetA, onsetB, maxLagMs)
+  const [best, second] = topPeaks(lags, scores, 2)
+  const bestScore = scores[best]
+  // 搜尋範圍太窄、只有一個峰時無從比較
+  const runnerUp = second === undefined ? 0 : scores[second]
+  const margin = bestScore > 0 ? (bestScore - runnerUp) / bestScore : 0
+  return buildResult(lags[best], bestScore, second === undefined ? null : lags[second], runnerUp, margin)
+}
+
+/**
+ * 起音互相關挑出幾個候選位置,再用「段落音量輪廓」決定是哪一個。
+ *
+ * 為什麼只看起音不夠:舞曲是一小節一小節循環做出來的,同一個段落裡每一小節的
+ * 鼓組幾乎一模一樣,主歌和副歌還會整段重複。起音序列在「差了幾小節」的位置上
+ * 一樣吻合,只有段落交界那幾拍能分辨對錯 —— 再加上教室錄音的跺腳和講話,
+ * 正確答案與「對到隔壁 5 小節」的分數差距常常小於雜訊。
+ * 實際回報:正確是 3.69 秒,工具給了 13.69 秒,剛好差 5 小節(120 BPM)。
+ *
+ * 段落音量輪廓(音量包絡取對數、平滑到 1 秒)看的是另一個尺度:
+ * 前奏小聲、主歌中等、副歌最大聲。差幾小節的話,段落的高低起伏就對不上。
+ * 而且它對跺腳不敏感 —— 跺腳是零星的瞬間,平滑之後幾乎不見。
+ *
+ * 最終分數 = 起音分數(以最高者為 1 正規化) + 輪廓分數。
+ * 起音能明確分出勝負時(例如正確答案 1.0、次高 0.6),輪廓不會翻盤;
+ * 起音分不出來時(全部 0.95~1.0),由輪廓決定。
+ */
+export function alignAnalyses(
+  a: Pick<AudioAnalysis, 'envelope' | 'onset'>,
+  b: Pick<AudioAnalysis, 'envelope' | 'onset'>,
+  maxLagMs = 60_000,
+): AlignResult & { contourScore: number } {
+  const { lags, scores } = scoreAllLags(a.onset, b.onset, maxLagMs)
+  const peaks = topPeaks(lags, scores, CANDIDATE_COUNT)
+  const top = scores[peaks[0]]
+
+  const ca = contour(a.envelope)
+  const cb = contour(b.envelope)
+
+  const ranked = peaks
+    .map((i) => {
+      const contourScore = pearsonAtLag(ca, cb, lags[i])
+      const onsetNorm = top > 0 ? scores[i] / top : 0
+      return { lag: lags[i], onset: scores[i], contourScore, total: onsetNorm + contourScore }
+    })
+    .sort((x, y) => y.total - x.total)
+
+  const best = ranked[0]
+  const second = ranked[1]
+  const margin =
+    second && best.total > 0 ? (best.total - second.total) / best.total : second ? 0 : 1
+  return {
+    ...buildResult(best.lag, best.onset, second?.lag ?? null, second?.onset ?? 0, margin),
+    contourScore: best.contourScore,
+  }
+}
+
+/** 起音挑出幾個候選位置交給輪廓複審 */
+/**
+ * 起音挑出幾個候選位置交給輪廓複審。
+ * 合成測試裡 12 個不夠:跺腳很多的時候,正確答案在起音排名可能掉到二十幾名
+ * (段落內每一小節都長一樣,前面全是「差幾小節」的假峰)。30 個就 8/8 全對。
+ */
+const CANDIDATE_COUNT = 30
+
+/**
+ * 輪廓的視窗與百分位數。
+ *
+ * 用**低百分位數**而不是平均:跺腳、拍手、講話都只會把音量往上加,
+ * 取視窗內偏低的那一端,看到的就是「底下那層音樂」的音量。
+ * 合成教室錄音(8 種噪音)的結果:
+ *   1 秒平均 / 中位數   2/8 對
+ *   2 秒第 15 百分位     7/8 對
+ *   3 秒第 10 百分位     8/8 對,正確位置的輪廓相關 0.88~0.92
+ * 視窗要比一小節(2 秒)長才吃得掉零星的跺腳,又要比一個段落(16 秒)短很多才分得出段落。
+ */
+const CONTOUR_WINDOW = ENVELOPE_HZ * 3
+const CONTOUR_PERCENTILE = 0.1
+/** 每隔幾格才重算一次百分位數。輪廓本來就是慢變化,0.1 秒一點足夠,計算量少 10 倍 */
+const CONTOUR_STEP = ENVELOPE_HZ / 10
+
+/** 段落音量輪廓:對數音量(與起音同一個參考點,對整體音量免疫),再取滑動視窗的低百分位數 */
+function contour(envelope: Float32Array): Float32Array {
+  const n = envelope.length
+  const sorted = Float32Array.from(envelope).sort()
+  const level = sorted[Math.min(n - 1, Math.floor(n * ONSET_REF_PERCENTILE))]
+  const ref = level > 0 ? level / ONSET_REF_DIVISOR : 1
+  const log = new Float32Array(n)
+  for (let i = 0; i < n; i++) log[i] = Math.log1p(envelope[i] / ref)
+
+  const out = new Float32Array(n)
+  const half = CONTOUR_WINDOW >> 1
+  const buf = new Float32Array(CONTOUR_WINDOW + 1)
+  for (let i = 0; i < n; i += CONTOUR_STEP) {
+    const lo = Math.max(0, i - half)
+    const hi = Math.min(n, i + half + 1)
+    const m = hi - lo
+    for (let j = 0; j < m; j++) buf[j] = log[lo + j]
+    const view = buf.subarray(0, m).sort()
+    out.fill(view[Math.floor((m - 1) * CONTOUR_PERCENTILE)], i, Math.min(n, i + CONTOUR_STEP))
+  }
+  return out
+}
+
+/** b[t] 對上 a[t + lag] 時,重疊區上的 Pearson 相關係數 */
+function pearsonAtLag(a: Float32Array, b: Float32Array, lag: number): number {
+  const lo = Math.max(0, -lag)
+  const hi = Math.min(b.length, a.length - lag)
+  const n = hi - lo
+  if (n < 2) return 0
+  let sa = 0
+  let sb = 0
+  let saa = 0
+  let sbb = 0
+  let sab = 0
+  for (let t = lo; t < hi; t++) {
+    const x = a[t + lag]
+    const y = b[t]
+    sa += x
+    sb += y
+    saa += x * x
+    sbb += y * y
+    sab += x * y
+  }
+  const den = Math.sqrt(Math.max(0, n * saa - sa * sa) * Math.max(0, n * sbb - sb * sb))
+  return den > 0 ? (n * sab - sa * sb) / den : 0
 }

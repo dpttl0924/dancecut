@@ -2,7 +2,7 @@ import { useRef, useState } from 'react'
 import { useProject } from '../store/useProject'
 import { formatSeconds, formatTime } from '../lib/format'
 import { MAX_CLIP_SCALE, MIN_CLIP_SCALE, isAudioOnly, type ClipId } from '../lib/types'
-import { MEDIA_ACCEPT } from '../lib/mediaSupport'
+import { MEDIA_ACCEPT, isIOSLike } from '../lib/mediaSupport'
 import { Button, Field, Panel, Slider, inputClass } from './ui'
 
 /**
@@ -226,6 +226,12 @@ export function ClipPanel({ id }: { id: ClipId }) {
             onChange={(v) => setVolume(id, v)}
             format={(v) => `${(v * 100).toFixed(0)}%`}
           />
+          {isIOSLike() && (
+            <p className="-mt-1 text-[11px] leading-relaxed text-white/40">
+              iPhone / iPad 的瀏覽器不能調影片音量,只分「0% 靜音」和「有聲」。
+              兩支都有聲音時系統會互相暫停、畫面會頓,預覽時建議只留一支有聲音。
+            </p>
+          )}
 
           <div className="flex items-end gap-2">
             <Field label="影格率(自動偵測)">
@@ -269,7 +275,7 @@ function ProxyStatus({
   progress,
   message,
 }: {
-  status: 'none' | 'queued' | 'running' | 'ready' | 'error'
+  status: 'none' | 'queued' | 'running' | 'ready' | 'skipped' | 'error'
   progress: number
   message: string
 }) {
@@ -282,6 +288,7 @@ function ProxyStatus({
         製作預覽版 {Math.round(progress * 100)}%(轉好前用原檔預覽)
       </div>
     )
+  if (status === 'skipped') return <div className="text-white/40">這支解碼很輕,不需要預覽版</div>
   if (status === 'ready')
     return (
       <div className="text-emerald-300/80">

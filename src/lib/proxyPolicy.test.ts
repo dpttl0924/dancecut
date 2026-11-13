@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { needsProxy, proxySize } from './proxyPolicy'
+import { needsProxy, proxyFrameRate, proxySize, worthProxying } from './proxyPolicy'
 
 describe('needsProxy', () => {
   it('720p 以下不做,轉一次的代價划不來', () => {
@@ -31,5 +31,27 @@ describe('proxySize', () => {
   })
   it('不會放大', () => {
     expect(proxySize(640, 360)).toEqual({ width: 640, height: 360 })
+  })
+})
+
+describe('worthProxying', () => {
+  it('1080p30 的 H.264(YouTube 下載的官方影片)不轉,讓位給真正吃重的那支', () => {
+    expect(worthProxying({ codec: 'avc', width: 1920, height: 1080, fps: 30 })).toBe(false)
+    expect(worthProxying({ codec: 'avc', width: 1920, height: 1080, fps: 29.97 })).toBe(false)
+  })
+  it('iPhone 的 HEVC 一律轉', () => {
+    expect(worthProxying({ codec: 'hevc', width: 1920, height: 1080, fps: 30 })).toBe(true)
+  })
+  it('4K 或 1080p60 即使是 H.264 也轉', () => {
+    expect(worthProxying({ codec: 'avc', width: 3840, height: 2160, fps: 30 })).toBe(true)
+    expect(worthProxying({ codec: 'avc', width: 1920, height: 1080, fps: 60 })).toBe(true)
+  })
+})
+
+describe('proxyFrameRate', () => {
+  it('60fps 降成 30,30fps 以下沿用原檔', () => {
+    expect(proxyFrameRate(59.94)).toBe(30)
+    expect(proxyFrameRate(30)).toBeUndefined()
+    expect(proxyFrameRate(24)).toBeUndefined()
   })
 })

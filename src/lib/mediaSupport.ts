@@ -76,3 +76,17 @@ export function describeLoadFailure(
 
   return '無法讀取這個檔案,格式可能不支援。'
 }
+
+/**
+ * iPhone / iPad(含「要求桌面版網站」時偽裝成 Mac 的 iPad)。
+ *
+ * 只用來決定要不要顯示提示,不用來切換行為 —— 行為一律寫成兩邊都正確的版本。
+ * iOS 的 Safari 會忽略 `<video>.volume`,而且不允許兩支有聲音的影片同時播放。
+ */
+export function isIOSLike(): boolean {
+  if (typeof navigator === 'undefined') return false
+  return (
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+  )
+}

@@ -45,3 +45,31 @@ export function proxySize(width: number, height: number): { width: number; heigh
 function toEven(v: number): number {
   return Math.max(2, Math.round(v / 2) * 2)
 }
+
+/** 代理檔最高格率。60fps 的來源只留一半的格,編碼與縮圖的工作量直接減半 */
+export const PROXY_MAX_FPS = 30
+
+/**
+ * 真的打開檔案、看到編碼與格率之後的第二道判斷。
+ *
+ * needsProxy 只看尺寸(載入時就要決定,還沒有 mediabunny)。但 1080p30 的 H.264 ——
+ * 例如從 YouTube 下載的官方練習影片 —— iPad 解起來很輕鬆,幫它轉代理檔只是白白
+ * 排在 iPhone 的 4K HEVC 前面,讓真正需要的那支等更久。
+ *
+ * 需要轉的:任何 HEVC(iPhone 預設)、超過 1080p30 像素量的任何東西(4K、1080p60)。
+ */
+export function worthProxying(info: {
+  codec: string | null
+  width: number
+  height: number
+  fps: number
+}): boolean {
+  const pixelRate = info.width * info.height * Math.max(1, info.fps)
+  const light = info.codec === 'avc' && pixelRate <= 1920 * 1080 * 31
+  return !light
+}
+
+/** 代理檔的格率:不超過 PROXY_MAX_FPS。undefined = 沿用原檔 */
+export function proxyFrameRate(sourceFps: number): number | undefined {
+  return sourceFps > PROXY_MAX_FPS + 1 ? PROXY_MAX_FPS : undefined
+}

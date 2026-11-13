@@ -12,7 +12,9 @@ import type { InputAudioTrack } from 'mediabunny'
 import {
   PROXY_BITRATE,
   PROXY_KEYFRAME_INTERVAL,
+  proxyFrameRate,
   proxySize,
+  worthProxying,
 } from './proxyPolicy'
 
 /**
@@ -29,7 +31,7 @@ import {
 export async function buildProxy(
   file: Blob,
   opts: { onProgress?: (ratio: number) => void; signal?: AbortSignal } = {},
-): Promise<Blob> {
+): Promise<Blob | null> {
   const { onProgress, signal } = opts
   const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) })
   try {
@@ -37,7 +39,22 @@ export async function buildProxy(
     if (!video) throw new Error('沒有視訊軌')
     if (!(await video.canDecode())) throw new Error(`這個瀏覽器解不開視訊編碼(${video.codec ?? '未知'})`)
 
+    // 看過編碼與格率才知道值不值得轉。不值得就回傳 null,預覽直接用原檔
+    const stats = await video.computePacketStats(120)
+    const fps = stats.averagePacketRate
+    if (
+      !worthProxying({
+        codec: video.codec,
+        width: video.displayWidth,
+        height: video.displayHeight,
+        fps,
+      })
+    ) {
+      return null
+    }
+
     const size = proxySize(video.displayWidth, video.displayHeight)
+    const frameRate = proxyFrameRate(fps)
     if (!(await canEncodeVideo('avc', { ...size, bitrate: PROXY_BITRATE }))) {
       throw new Error('這個瀏覽器不能編 H.264')
     }
@@ -63,7 +80,10 @@ export async function buildProxy(
               bitrate: PROXY_BITRATE,
               keyFrameInterval: PROXY_KEYFRAME_INTERVAL,
               forceTranscode: true,
-              // 刻意不給 frameRate:代理檔要跟原檔一格對一格,逐幀才會落在同一張畫面上
+              // 30fps 以下不給 frameRate,代理檔跟原檔一格對一格。
+              // 60fps 的來源降成 30:編碼與縮圖的工作量減半,轉檔時間是這裡最大的痛點。
+              // 代價是預覽逐幀時每兩步才換一張畫面,匯出仍是原檔的 60fps。
+              ...(frameRate ? { frameRate } : {}),
             }
           : { discard: true },
       audio: (track) => (track.id === keepAudio?.id ? {} : { discard: true }),

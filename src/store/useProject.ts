@@ -1,5 +1,5 @@
 ﻿import { create } from 'zustand'
-import { alignOnsets, analyzeAudio } from '../lib/audio'
+import { alignAnalyses, analyzeAudio } from '../lib/audio'
 import { projectDuration } from '../lib/layout'
 import { playbackClock } from '../lib/playbackClock'
 import { DEFAULT_FPS, measureClipFps } from '../lib/frameRate'
@@ -33,7 +33,7 @@ interface AlignState {
 
 const IDLE_ALIGN: AlignState = { status: 'idle', message: '', alternativeLagMs: null }
 
-export type ProxyStatus = 'none' | 'queued' | 'running' | 'ready' | 'error'
+export type ProxyStatus = 'none' | 'queued' | 'running' | 'ready' | 'skipped' | 'error'
 
 export interface ProxyState {
   status: ProxyStatus
@@ -788,7 +788,7 @@ export const useProject = create<ProjectState>()((set, get) => ({
     const a = clips.a
     const b = clips.b
     if (!a || !b) return
-    if (!a.onset || !b.onset) {
+    if (!a.onset || !b.onset || !a.envelope || !b.envelope) {
       set({
         align: {
           status: 'error',
@@ -798,8 +798,8 @@ export const useProject = create<ProjectState>()((set, get) => ({
       })
       return
     }
-    const onsetA = a.onset
-    const onsetB = b.onset
+    const analysisA = { onset: a.onset, envelope: a.envelope }
+    const analysisB = { onset: b.onset, envelope: b.envelope }
 
     set({ align: { status: 'running', message: '比對音訊中…', alternativeLagMs: null } })
 
@@ -807,9 +807,11 @@ export const useProject = create<ProjectState>()((set, get) => ({
     setTimeout(() => {
       try {
         const t0 = performance.now()
-        const { lagMs, score, hasAlternative, runnerUpLagMs } = alignOnsets(
-          onsetA,
-          onsetB,
+        // 起音挑候選、段落音量輪廓定案 —— 只看起音的話,循環製作的舞曲
+        // 很容易對到差幾小節的重複段落(見 alignAnalyses)
+        const { lagMs, score, hasAlternative, runnerUpLagMs } = alignAnalyses(
+          analysisA,
+          analysisB,
         )
         const elapsed = Math.round(performance.now() - t0)
 
@@ -879,6 +881,11 @@ function scheduleProxy(id: ClipId, file: File, url: string) {
         },
       })
       if (!stillCurrent()) return
+      if (!blob) {
+        // 打開來看過,這支解碼很輕(例如 1080p30 的 H.264),不需要代理檔
+        setProxy({ status: 'skipped', progress: 0, message: '' })
+        return
+      }
       const previewUrl = URL.createObjectURL(blob)
       useProject.setState((s) => {
         const cur = s.clips[id]

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { pickMaster, type VideoRefs } from './usePlaybackEngine'
+import { pickMaster, setVolume, type VideoRefs } from './usePlaybackEngine'
 import type { Clip, ClipId } from '../lib/types'
 
 /**
@@ -107,5 +107,35 @@ describe('時鐘主控', () => {
 
   it('只有一支素材時就是它', () => {
     expect(pickMaster(refs({ b: null }), { a: clip(), b: null }, 0)).toBe('a')
+  })
+})
+
+describe('音量', () => {
+  /** 模擬 iOS:volume 是唯讀的,寫了也永遠讀回 1 */
+  const iosVideo = () => {
+    let writes = 0
+    const el = { muted: false } as HTMLVideoElement & { writes: () => number }
+    Object.defineProperty(el, 'volume', {
+      get: () => 1,
+      set: () => {
+        writes++
+      },
+    })
+    el.writes = () => writes
+    return el
+  }
+
+  it('音量 0 一定要設 muted —— iOS 不理 volume,兩支有聲影片會互相暫停', () => {
+    const el = iosVideo()
+    setVolume(el, 0)
+    expect(el.muted).toBe(true)
+    setVolume(el, 0.8)
+    expect(el.muted).toBe(false)
+  })
+
+  it('iOS 上 volume 讀回來永遠是 1,不能因此每幀都寫一次', () => {
+    const el = iosVideo()
+    for (let i = 0; i < 60; i++) setVolume(el, 0.5)
+    expect(el.writes()).toBe(1)
   })
 })

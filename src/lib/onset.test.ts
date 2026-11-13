@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { alignOnsets, EnvelopeAccumulator, onsetFromEnvelope } from './audio'
-import { makeSong, recordInRoom, SR } from './onset.test.helpers'
+import { alignAnalyses, alignOnsets, EnvelopeAccumulator, onsetFromEnvelope } from './audio'
+import { makeSong, makeStructuredSong, recordInRoom, SR } from './onset.test.helpers'
 
 /**
  * 真實情境:A 是官方練習室影片(乾淨、大聲),B 是自己在教室用手機錄的 cover ——
@@ -50,5 +50,36 @@ describe('onsetFromEnvelope', () => {
     const r = alignOnsets(songOnset, analyze(room).onset)
     expect(r.lagMs).toBe(7300)
     expect(r.score).toBeGreaterThan(0.6)
+  })
+})
+
+describe('alignAnalyses:循環製作的舞曲不能對到重複的段落', () => {
+  /**
+   * 實際回報:正確偏移 3.69 秒,只看起音的版本給了 13.69 秒(差 5 小節)。
+   * 段落內每一小節完全相同,只看起音時正確答案和「差幾小節」分不開,
+   * 合成測試裡 8 種教室噪音只對了 3 種。
+   */
+  const song = makeStructuredSong()
+  const A = analyze(song)
+
+  it.each([3, 5, 7, 11, 13, 17, 19, 23])('教室錄音(噪音種子 %i)對到 3.69 秒', (seed) => {
+    const B = analyze(recordInRoom(song, 3.69, 0.03, seed))
+    const r = alignAnalyses(A, B)
+    expect(r.lagMs).toBe(3690)
+    expect(r.contourScore).toBeGreaterThan(0.8)
+  })
+
+  it('只看起音的版本在同樣的素材上會錯(證明這個測試真的有在測東西)', () => {
+    const wrong = [3, 11, 13].filter((seed) => {
+      const B = analyze(recordInRoom(song, 3.69, 0.03, seed))
+      return alignOnsets(A.onset, B.onset).lagMs !== 3690
+    })
+    expect(wrong.length).toBeGreaterThan(0)
+  })
+
+  it('非循環的歌也照樣對得到', () => {
+    const plain = makeSong(90)
+    const r = alignAnalyses(analyze(plain), analyze(recordInRoom(plain, 7.3, 0.03)))
+    expect(r.lagMs).toBe(7300)
   })
 })
