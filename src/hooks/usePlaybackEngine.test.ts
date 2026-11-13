@@ -105,6 +105,22 @@ describe('時鐘主控', () => {
     expect(pickMaster(r, clips, 0)).toBe('a')
   })
 
+  it('兩支都輕(≤1080p)時,唯一有聲音的那支當主控 —— iOS 改有聲影片的速度會頓', () => {
+    const clips = {
+      a: clip({ id: 'a', width: 1920, height: 1080, volume: 0 }),
+      b: clip({ id: 'b', width: 960, height: 540, volume: 1 }),
+    }
+    expect(pickMaster(refs(), clips, 0)).toBe('b')
+  })
+
+  it('有一支是 4K 時,仍然讓重的當主控(對 4K 反覆 seek 更糟)', () => {
+    const clips = {
+      a: clip({ id: 'a', width: 3840, height: 2160, volume: 0 }),
+      b: clip({ id: 'b', width: 960, height: 540, volume: 1 }),
+    }
+    expect(pickMaster(refs(), clips, 0)).toBe('a')
+  })
+
   it('只有一支素材時就是它', () => {
     expect(pickMaster(refs({ b: null }), { a: clip(), b: null }, 0)).toBe('a')
   })

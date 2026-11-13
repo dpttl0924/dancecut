@@ -6,6 +6,7 @@ import { DEFAULT_FPS, measureClipFps } from '../lib/frameRate'
 import { projectToContent, type TimelineMap } from '../lib/timeline'
 import { describeLoadFailure } from '../lib/mediaSupport'
 import { needsProxy } from '../lib/proxyPolicy'
+import { loadCachedProxy, proxyCacheKey, saveCachedProxy } from '../lib/proxyCache'
 import { MAX_BPM, MIN_BPM, MIN_CONFIDENCE, detectTempo, type TempoEstimate } from '../lib/tempo'
 import {
   ASPECT_SIZES,
@@ -856,6 +857,10 @@ export const useProject = create<ProjectState>()((set, get) => ({
  * 每一步都要確認素材還是同一支(url 沒變):轉檔要幾十秒,
  * 中途被換掉或移除的話,遲到的結果不能蓋上去。
  */
+function formatEta(sec: number): string {
+  return sec >= 60 ? `${Math.floor(sec / 60)} 分 ${sec % 60} 秒` : `${sec} 秒`
+}
+
 function scheduleProxy(id: ClipId, file: File, url: string) {
   const ctrl = new AbortController()
   proxyAborts[id] = ctrl
@@ -863,7 +868,26 @@ function scheduleProxy(id: ClipId, file: File, url: string) {
   const setProxy = (p: ProxyState) =>
     useProject.setState((s) => ({ proxy: { ...s.proxy, [id]: p } }))
 
-  proxyQueue = proxyQueue.then(async () => {
+  const key = proxyCacheKey(file)
+
+  const apply = (blob: Blob, message: string) => {
+    const previewUrl = URL.createObjectURL(blob)
+    useProject.setState((s) => {
+      const cur = s.clips[id]
+      if (!cur || cur.url !== url) {
+        URL.revokeObjectURL(previewUrl)
+        return s
+      }
+      return {
+        clips: { ...s.clips, [id]: { ...cur, previewUrl } },
+        proxy: { ...s.proxy, [id]: { status: 'ready', progress: 1, message } },
+        // 換成輕量的代理檔後,之前「追不上」的判定不再成立
+        syncStrained: false,
+      }
+    })
+  }
+
+  const convert = async () => {
     await waitForAnalyses()
     if (!stillCurrent()) return
     setProxy({ status: 'running', progress: 0, message: '' })
@@ -877,7 +901,14 @@ function scheduleProxy(id: ClipId, file: File, url: string) {
           // 進度回呼很密,節流成 1% 一跳,免得整棵樹一直重繪
           if (p - lastReport < 0.01 || !stillCurrent()) return
           lastReport = p
-          setProxy({ status: 'running', progress: p, message: '' })
+          // 要等好幾分鐘的事一定要給剩餘時間,不然使用者不知道該不該等
+          const elapsed = (performance.now() - t0) / 1000
+          const remaining = p > 0.02 ? Math.round((elapsed / p) * (1 - p)) : null
+          setProxy({
+            status: 'running',
+            progress: p,
+            message: remaining === null ? '' : `約剩 ${formatEta(remaining)}`,
+          })
         },
       })
       if (!stillCurrent()) return
@@ -886,24 +917,9 @@ function scheduleProxy(id: ClipId, file: File, url: string) {
         setProxy({ status: 'skipped', progress: 0, message: '' })
         return
       }
-      const previewUrl = URL.createObjectURL(blob)
-      useProject.setState((s) => {
-        const cur = s.clips[id]
-        if (!cur || cur.url !== url) {
-          URL.revokeObjectURL(previewUrl)
-          return s
-        }
-        return {
-          clips: { ...s.clips, [id]: { ...cur, previewUrl } },
-          proxy: {
-            ...s.proxy,
-            // ready 時 message 放耗時,給使用者判斷是轉檔慢還是別的地方慢
-            [id]: { status: 'ready', progress: 1, message: `${Math.round((performance.now() - t0) / 1000)}s` },
-          },
-          // 換成輕量的代理檔後,之前「追不上」的判定不再成立
-          syncStrained: false,
-        }
-      })
+      // ready 時 message 放耗時,給使用者判斷是轉檔慢還是別的地方慢
+      apply(blob, `轉檔 ${formatEta(Math.round((performance.now() - t0) / 1000))}`)
+      void saveCachedProxy(key, blob)
     } catch (err) {
       if (!stillCurrent()) return
       const message = err instanceof Error ? err.message : String(err)
@@ -912,5 +928,16 @@ function scheduleProxy(id: ClipId, file: File, url: string) {
     } finally {
       if (proxyAborts[id] === ctrl) delete proxyAborts[id]
     }
+  }
+
+  // 先查快取。查快取很快,不必排在別支的轉檔後面
+  void loadCachedProxy(key).then((cached) => {
+    if (!stillCurrent()) return
+    if (cached) {
+      apply(cached, '沿用上次轉好的')
+      if (proxyAborts[id] === ctrl) delete proxyAborts[id]
+      return
+    }
+    proxyQueue = proxyQueue.then(convert)
   })
 }

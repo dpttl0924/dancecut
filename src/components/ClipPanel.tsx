@@ -285,14 +285,14 @@ function ProxyStatus({
   if (status === 'running')
     return (
       <div className="text-amber-300/80">
-        製作預覽版 {Math.round(progress * 100)}%(轉好前用原檔預覽)
+        製作預覽版 {Math.round(progress * 100)}%{message ? `,${message}` : ''}(轉好前用原檔預覽,只需轉一次)
       </div>
     )
   if (status === 'skipped') return <div className="text-white/40">這支解碼很輕,不需要預覽版</div>
   if (status === 'ready')
     return (
       <div className="text-emerald-300/80">
-        預覽使用 540p 預覽版{message ? `(轉檔 ${message})` : ''} · 匯出仍用原檔
+        預覽使用 540p 預覽版{message ? `(${message})` : ''} · 匯出仍用原檔
       </div>
     )
   return <div className="text-white/40" title={message}>預覽版製作失敗,用原檔預覽({message})</div>

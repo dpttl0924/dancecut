@@ -1,3 +1,4 @@
+import { waveformHeight, waveformRef } from '../lib/waveform'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { playRange, timelineMap, useProject } from '../store/useProject'
@@ -379,9 +380,8 @@ function drawLane(
     return
   }
 
-  let max = 0
-  for (let i = 0; i < env.length; i++) if (env[i] > max) max = env[i]
-  if (max <= 0) return
+  const ref = waveformRef(env)
+  if (ref <= 0) return
 
   const msPerSample = 1000 / ENVELOPE_HZ
   const cy = top + laneH / 2
@@ -393,9 +393,11 @@ function drawLane(
     const t1 = projectToContent(((x + 1) / width) * durationMs, map) - clip.offsetMs
     const i0 = Math.max(0, Math.floor(t0 / msPerSample))
     const i1 = Math.min(env.length, Math.max(i0 + 1, Math.ceil(t1 / msPerSample)))
-    let peak = 0
-    for (let i = i0; i < i1; i++) if (env[i] > peak) peak = env[i]
-    const h = (peak / max) * (laneH / 2 - 2)
+    // 一個像素裡取平均而不是峰值:跺腳、拍手是零星的瞬間,取峰值會讓它們蓋掉音樂
+    let sum = 0
+    for (let i = i0; i < i1; i++) sum += env[i]
+    const level = i1 > i0 ? sum / (i1 - i0) : 0
+    const h = waveformHeight(level, ref) * (laneH / 2 - 2)
     ctx.fillRect(x, cy - h, 1, Math.max(1, h * 2))
   }
 }

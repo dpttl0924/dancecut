@@ -168,12 +168,31 @@ export function pickMaster(
   })
   if (eligible.length === 0) return null
 
+  // 兩支都解得很輕鬆時(轉成代理檔之後通常如此),解碼負擔不再是考量,
+  // 改讓**唯一有聲音的那支**當主控、永遠不去動它。理由見 LIGHT_PIXELS。
+  const audible = eligible.filter((id) => clips[id]!.volume > 0.01)
+  const allLight = eligible.every((id) => decodeCost(refs[id].current, clips[id]) <= LIGHT_PIXELS)
+  if (allLight && audible.length === 1) return audible[0]
+
   return eligible.reduce((best, id) =>
     decodeCost(refs[id].current, clips[id]) > decodeCost(refs[best].current, clips[best])
       ? id
       : best,
   )
 }
+
+/**
+ * 不超過 1080p 就算「輕」。
+ *
+ * 輕的時候,誰當從屬不再取決於解碼:從屬被校正的代價變成「改播放速度」本身。
+ * iOS 上改一支**有聲音**影片的 playbackRate 要重新對時音訊管線,畫面會頓一下 ——
+ * 實測是「轉好預覽版後偶爾停頓一下」。靜音的影片改速度沒有這個成本,
+ * 所以讓有聲音的那支當主控,校正全部交給靜音的那支。
+ *
+ * 有一支超過 1080p(例如沒轉代理檔的 4K)時維持原規則:重的當主控,
+ * 對著解不動的 4K 反覆 seek 比聲音被微調速度糟得多。
+ */
+const LIGHT_PIXELS = 1920 * 1080
 
 /**
  * 解碼負擔的代理指標:**目前實際在播的**那個來源的像素數。
