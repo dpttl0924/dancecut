@@ -33,9 +33,13 @@ export function needsProxy(width: number, height: number): boolean {
  * 代理檔的尺寸(顯示方向,已考慮旋轉)。兩邊都取偶數 —— 編碼器普遍要求。
  * 只會縮小,不會放大。
  */
-export function proxySize(width: number, height: number): { width: number; height: number } {
+export function proxySize(
+  width: number,
+  height: number,
+  shortSide = PROXY_SHORT_SIDE,
+): { width: number; height: number } {
   const short = Math.min(width, height)
-  const scale = Math.min(1, PROXY_SHORT_SIDE / short)
+  const scale = Math.min(1, shortSide / short)
   return {
     width: toEven(width * scale),
     height: toEven(height * scale),
@@ -72,4 +76,25 @@ export function worthProxying(info: {
 /** 代理檔的格率:不超過 PROXY_MAX_FPS。undefined = 沿用原檔 */
 export function proxyFrameRate(sourceFps: number): number | undefined {
   return sourceFps > PROXY_MAX_FPS + 1 ? PROXY_MAX_FPS : undefined
+}
+
+/** WebCodecs 轉檔至少跑這麼久才判斷快慢,太早判斷會被開頭的初始化時間誤導 */
+export const PROBE_SECONDS = 8
+/** 預估總耗時超過影片長度的這個倍數,就改用即時錄製(它大約等於影片長度) */
+export const SLOW_FACTOR = 1.2
+
+/**
+ * WebCodecs 轉檔是不是比「播一遍錄下來」還慢。
+ *
+ * 不事先猜哪種檔案會慢 —— 實測 iPhone 4K HDR 的 .mov 走 WebCodecs 要 20 分鐘,
+ * 桌機上同一條路卻比即時快 10 倍。直接跑幾秒看實際速度最準。
+ */
+export function tooSlowForWebCodecs(
+  elapsedSec: number,
+  progress: number,
+  durationSec: number,
+): boolean {
+  if (elapsedSec < PROBE_SECONDS || durationSec <= 0) return false
+  if (progress <= 0) return true
+  return elapsedSec / progress > durationSec * SLOW_FACTOR
 }

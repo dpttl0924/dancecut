@@ -895,19 +895,32 @@ function scheduleProxy(id: ClipId, file: File, url: string) {
     try {
       const { buildProxy } = await import('../lib/proxy')
       let lastReport = 0
+      // 換成即時錄製時進度從 0 重來,剩餘時間也要重新估
+      let phaseStart = t0
+      let capturing = false
       const blob = await buildProxy(file, {
         signal: ctrl.signal,
+        onMethod: (method) => {
+          capturing = method === 'capture'
+          phaseStart = performance.now()
+          lastReport = 0
+          if (capturing && stillCurrent()) {
+            setProxy({ status: 'running', progress: 0, message: '改用即時錄製' })
+          }
+        },
         onProgress: (p) => {
           // 進度回呼很密,節流成 1% 一跳,免得整棵樹一直重繪
           if (p - lastReport < 0.01 || !stillCurrent()) return
           lastReport = p
           // 要等好幾分鐘的事一定要給剩餘時間,不然使用者不知道該不該等
-          const elapsed = (performance.now() - t0) / 1000
+          const elapsed = (performance.now() - phaseStart) / 1000
           const remaining = p > 0.02 ? Math.round((elapsed / p) * (1 - p)) : null
+          const eta = remaining === null ? '' : `約剩 ${formatEta(remaining)}`
           setProxy({
             status: 'running',
             progress: p,
-            message: remaining === null ? '' : `約剩 ${formatEta(remaining)}`,
+            // 即時錄製靠播放器在播,切到別的 App 會暫停 —— 一定要講
+            message: capturing ? ['即時錄製中,請留在這個畫面', eta].filter(Boolean).join(' · ') : eta,
           })
         },
       })

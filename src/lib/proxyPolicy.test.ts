@@ -1,5 +1,26 @@
 import { describe, expect, it } from 'vitest'
-import { needsProxy, proxyFrameRate, proxySize, worthProxying } from './proxyPolicy'
+import {
+  needsProxy,
+  proxyFrameRate,
+  proxySize,
+  tooSlowForWebCodecs,
+  worthProxying,
+} from './proxyPolicy'
+
+describe('tooSlowForWebCodecs', () => {
+  it('開頭幾秒不下判斷', () => {
+    expect(tooSlowForWebCodecs(3, 0, 180)).toBe(false)
+  })
+  it('iPhone 4K HDR:跑了 10 秒才 1%(預估 1000 秒 > 3 分鐘)→ 改即時錄製', () => {
+    expect(tooSlowForWebCodecs(10, 0.01, 180)).toBe(true)
+  })
+  it('桌機:10 秒就 60% → 繼續 WebCodecs', () => {
+    expect(tooSlowForWebCodecs(10, 0.6, 180)).toBe(false)
+  })
+  it('跑了很久進度還是 0 → 改即時錄製', () => {
+    expect(tooSlowForWebCodecs(9, 0, 180)).toBe(true)
+  })
+})
 
 describe('needsProxy', () => {
   it('720p 以下不做,轉一次的代價划不來', () => {

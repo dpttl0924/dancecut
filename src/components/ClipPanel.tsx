@@ -4,6 +4,7 @@ import { formatSeconds, formatTime } from '../lib/format'
 import { MAX_CLIP_SCALE, MIN_CLIP_SCALE, isAudioOnly, type ClipId } from '../lib/types'
 import { MEDIA_ACCEPT, isIOSLike } from '../lib/mediaSupport'
 import { Button, Field, Panel, Slider, inputClass } from './ui'
+import { ConvertToMp4 } from './ConvertToMp4'
 
 /**
  * 手動覆寫用的選項。載入時會實測並自動填入,這裡只是量錯或量不出來時的退路。
@@ -258,6 +259,8 @@ export function ClipPanel({ id }: { id: ClipId }) {
               {busy ? loading!.stage : '換片'}
             </label>
           </div>
+
+          {!isAudioOnly(clip) && <ConvertToMp4 clip={clip} />}
         </>
       )}
 
