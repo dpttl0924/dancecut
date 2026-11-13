@@ -50,6 +50,17 @@ const NO_PROXY: ProxyState = { status: 'none', progress: 0, message: '' }
  * 正是這個功能要解決的負擔,而且轉檔期間預覽還在用原檔播。
  */
 let proxyQueue: Promise<void> = Promise.resolve()
+
+/**
+ * 進行中的音訊分析。代理檔要等它們全部結束才開始轉:
+ * 兩者都在解同一支大檔案,同時跑的話互搶解碼器與 I/O,iPad 上兩邊都變很慢。
+ * 音訊分析比較短、而且自動對齊要靠它,所以讓它先。
+ */
+const analysesInFlight = new Set<Promise<unknown>>()
+
+async function waitForAnalyses() {
+  while (analysesInFlight.size > 0) await Promise.allSettled([...analysesInFlight])
+}
 const proxyAborts: Partial<Record<ClipId, AbortController>> = {}
 
 function cancelProxy(id: ClipId, clip: Clip | null) {
@@ -437,11 +448,18 @@ export const useProject = create<ProjectState>()((set, get) => ({
 
       // 音訊分析比較慢,不擋 UI。分析完波形才會出現在時間軸上。
       try {
-        const { envelope, onset } = await analyzeAudio(file)
+        const analysisStart = performance.now()
+        const analysis = analyzeAudio(file)
+        analysesInFlight.add(analysis)
+        void analysis.catch(() => {}).finally(() => analysesInFlight.delete(analysis))
+        const { envelope, onset } = await analysis
+        const analysisSec = (performance.now() - analysisStart) / 1000
         set((s) => {
           const cur = s.clips[id]
           if (!cur || cur.url !== url) return s // 中途被換掉了
-          return { clips: { ...s.clips, [id]: { ...cur, envelope, onset } } }
+          return {
+            clips: { ...s.clips, [id]: { ...cur, envelope, onset, analysisSec } },
+          }
         })
       } catch (err) {
         // 原因一定要帶出來:「沒有音軌」和「瀏覽器解不開這種編碼」的處理方式完全不同
@@ -803,7 +821,10 @@ export const useProject = create<ProjectState>()((set, get) => ({
             status: score < MIN_SCORE ? 'warn' : 'done',
             message:
               score < MIN_SCORE
-                ? `偏移 ${(lagMs / 1000).toFixed(2)}s,但相關係數只有 ${score.toFixed(2)},兩段音訊可能不是同一首歌。`
+                ? // 不能說「可能不是同一首歌」:分數低多半只是錄音裡雜音多(跺腳、講話、離喇叭遠),
+                  // 實測這種情況偏移照樣算得對;反過來兩首無關但同 BPM 的歌分數反而很高。
+                  // 分數判斷不了對錯(見 alignOnsets 的說明),只能請使用者看一眼。
+                  `偏移 ${(lagMs / 1000).toFixed(2)}s。錄音裡雜音比較多(相關係數 ${score.toFixed(2)}),請播放確認一下,或看時間軸上兩條波形的重拍有沒有對上。`
                 : `偏移 ${(lagMs / 1000).toFixed(2)}s(${detail})`,
             alternativeLagMs: hasAlternative ? runnerUpLagMs : null,
           },
@@ -841,8 +862,10 @@ function scheduleProxy(id: ClipId, file: File, url: string) {
     useProject.setState((s) => ({ proxy: { ...s.proxy, [id]: p } }))
 
   proxyQueue = proxyQueue.then(async () => {
+    await waitForAnalyses()
     if (!stillCurrent()) return
     setProxy({ status: 'running', progress: 0, message: '' })
+    const t0 = performance.now()
     try {
       const { buildProxy } = await import('../lib/proxy')
       let lastReport = 0
@@ -865,7 +888,11 @@ function scheduleProxy(id: ClipId, file: File, url: string) {
         }
         return {
           clips: { ...s.clips, [id]: { ...cur, previewUrl } },
-          proxy: { ...s.proxy, [id]: { status: 'ready', progress: 1, message: '' } },
+          proxy: {
+            ...s.proxy,
+            // ready 時 message 放耗時,給使用者判斷是轉檔慢還是別的地方慢
+            [id]: { status: 'ready', progress: 1, message: `${Math.round((performance.now() - t0) / 1000)}s` },
+          },
           // 換成輕量的代理檔後,之前「追不上」的判定不再成立
           syncStrained: false,
         }

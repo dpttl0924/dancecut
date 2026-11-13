@@ -8,13 +8,14 @@ import { ENVELOPE_HZ } from './types'
  * 那就不必讓使用者手動拉時間軸 —— 直接算出偏移量。
  *
  * 流程:
- *   解碼 → 混單聲道 → 100Hz 音量包絡 → 對數壓縮 → 正向差分(起音強度)
- *   → 正規化 → FFT 互相關 → 重疊區 Pearson 相關係數 → 找峰值
+ *   解碼 → 混單聲道 → 100Hz 音量包絡 → 依自身音量正規化 → 對數壓縮
+ *   → 正向差分(起音強度) → 正規化 → FFT 互相關 → 重疊區 Pearson 相關係數 → 找峰值
  *
  * 為什麼比對「起音強度」而不是「音量包絡」:
  *   音量包絡會被兩支影片的錄音音量、EQ、環境噪音整體平移,相關性容易被低頻成分主導。
- *   正向差分只留下「音量突然變大」的瞬間 —— 也就是鼓點和重拍 —— 對響度差異免疫,
- *   峰值也尖銳得多。解析度上限由 ENVELOPE_HZ 決定,100Hz 即 10ms。
+ *   正向差分只留下「音量突然變大」的瞬間 —— 也就是鼓點和重拍 —— 峰值也尖銳得多。
+ *   對數壓縮前先除以這支自己的音量水準(見 onsetFromEnvelope),小聲錄的那支才不會吃虧。
+ *   解析度上限由 ENVELOPE_HZ 決定,100Hz 即 10ms。
  */
 
 export interface AudioAnalysis {
@@ -189,20 +190,46 @@ export class EnvelopeAccumulator {
   }
 
   finish(): AudioAnalysis {
-    const buckets = this.count
-    if (buckets < 2) throw new Error('音訊太短,無法分析')
-    const envelope = this.buf.slice(0, buckets)
-
-    // 對數壓縮後取正向差分 = 起音強度
-    const onset = new Float32Array(buckets)
-    let prev = Math.log1p(envelope[0] * 50)
-    for (let i = 1; i < buckets; i++) {
-      const cur = Math.log1p(envelope[i] * 50)
-      onset[i] = Math.max(0, cur - prev)
-      prev = cur
-    }
-    return { envelope, onset }
+    if (this.count < 2) throw new Error('音訊太短,無法分析')
+    const envelope = this.buf.slice(0, this.count)
+    return { envelope, onset: onsetFromEnvelope(envelope) }
   }
+}
+
+/**
+ * 對數壓縮的參考點:包絡第 90 百分位的 1/50。
+ *
+ * 舊版直接用 log1p(x·50),參考點是寫死的。log1p 對小訊號近似線性、對大訊號才是對數,
+ * 所以同一首歌,小聲錄的那支(例如教室裡手機離喇叭很遠)整條都落在線性區 ——
+ * 起音被壓扁,跺腳、拍手這些近距離的聲響反而主導。
+ * 合成測試裡音樂只剩 3% 音量時,相關係數從 0.30 掉到 0.16,
+ * 0.3% 時剩 0.13 —— 偏移其實算對了,但分數低到被判成「可能不是同一首歌」。
+ *
+ * 改成除以自己的音量水準之後,整體音量乘上 k 倍,參考點也乘 k 倍,結果完全不變。
+ * 用第 90 百分位而不是最大值,是為了不被一聲特別大的跺腳帶走;
+ * 1/50 讓大聲素材的行為跟舊版幾乎一樣(舊版的 50 是對滿音量素材調過的)。
+ */
+const ONSET_REF_PERCENTILE = 0.9
+const ONSET_REF_DIVISOR = 50
+
+export function onsetFromEnvelope(envelope: Float32Array): Float32Array {
+  const n = envelope.length
+  const onset = new Float32Array(n)
+  if (n < 2) return onset
+
+  const sorted = Float32Array.from(envelope).sort()
+  const level = sorted[Math.min(n - 1, Math.floor(n * ONSET_REF_PERCENTILE))]
+  // 全靜音就沒有起音可言,回傳全 0(對齊時 standardize 會處理)
+  if (!(level > 0)) return onset
+  const ref = level / ONSET_REF_DIVISOR
+
+  let prev = Math.log1p(envelope[0] / ref)
+  for (let i = 1; i < n; i++) {
+    const cur = Math.log1p(envelope[i] / ref)
+    onset[i] = Math.max(0, cur - prev)
+    prev = cur
+  }
+  return onset
 }
 
 /** 減平均、除標準差。互相關前一定要做,否則直流成分會蓋掉真正的峰值。 */

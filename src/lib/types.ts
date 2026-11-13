@@ -92,6 +92,8 @@ export interface Clip {
   volume: number
   /** 音量包絡(ENVELOPE_HZ),用於波形顯示與自動對齊 */
   envelope: Float32Array | null
+  /** 音訊分析花了幾秒。顯示給使用者看,手機上慢在哪裡才有線索 */
+  analysisSec?: number
   /** 起音強度包絡(envelope 的正向差分),自動對齊實際比對的就是它 */
   onset: Float32Array | null
 }

@@ -94,6 +94,17 @@ describe('時鐘主控', () => {
     expect(pickMaster(refs(), clips, 0)).toBe('a')
   })
 
+  it('看的是實際在播的來源:4K 原檔換成 540p 代理檔後就不該再當主控', () => {
+    const clips = {
+      a: clip({ id: 'a', width: 1920, height: 1080 }),
+      b: clip({ id: 'b', width: 3840, height: 2160 }),
+    }
+    const r = refs()
+    r.a.current = { readyState: 4, videoWidth: 1920, videoHeight: 1080 } as HTMLVideoElement
+    r.b.current = { readyState: 4, videoWidth: 960, videoHeight: 540 } as HTMLVideoElement
+    expect(pickMaster(r, clips, 0)).toBe('a')
+  })
+
   it('只有一支素材時就是它', () => {
     expect(pickMaster(refs({ b: null }), { a: clip(), b: null }, 0)).toBe('a')
   })

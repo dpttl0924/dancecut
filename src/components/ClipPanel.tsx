@@ -107,7 +107,9 @@ export function ClipPanel({ id }: { id: ClipId }) {
             <div className="text-white/40">
               {isAudioOnly(clip) ? '純音訊' : `${clip.width}×${clip.height}`} ·{' '}
               {formatTime(clip.durationMs)}
-              {clip.envelope ? ' · 音訊已分析' : ' · 音訊分析中…'}
+              {clip.envelope
+                ? ` · 音訊已分析${clip.analysisSec !== undefined ? `(${clip.analysisSec.toFixed(1)}s)` : ''}`
+                : ' · 音訊分析中…'}
             </div>
             <ProxyStatus status={proxy.status} progress={proxy.progress} message={proxy.message} />
           </div>
@@ -272,13 +274,19 @@ function ProxyStatus({
   message: string
 }) {
   if (status === 'none') return null
-  if (status === 'queued') return <div className="text-white/40">預覽版排隊中(轉好前用原檔預覽)</div>
+  if (status === 'queued')
+    return <div className="text-white/40">預覽版等音訊分析完再轉(轉好前用原檔預覽)</div>
   if (status === 'running')
     return (
       <div className="text-amber-300/80">
         製作預覽版 {Math.round(progress * 100)}%(轉好前用原檔預覽)
       </div>
     )
-  if (status === 'ready') return <div className="text-emerald-300/80">預覽使用 540p 預覽版 · 匯出仍用原檔</div>
+  if (status === 'ready')
+    return (
+      <div className="text-emerald-300/80">
+        預覽使用 540p 預覽版{message ? `(轉檔 ${message})` : ''} · 匯出仍用原檔
+      </div>
+    )
   return <div className="text-white/40" title={message}>預覽版製作失敗,用原檔預覽({message})</div>
 }

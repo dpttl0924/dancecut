@@ -169,12 +169,22 @@ export function pickMaster(
   if (eligible.length === 0) return null
 
   return eligible.reduce((best, id) =>
-    decodeCost(clips[id]) > decodeCost(clips[best]) ? id : best,
+    decodeCost(refs[id].current, clips[id]) > decodeCost(refs[best].current, clips[best])
+      ? id
+      : best,
   )
 }
 
-/** 解碼負擔的代理指標。量不到尺寸時當成 0,寧可不要搶主控。 */
-function decodeCost(clip: Clip | null): number {
+/**
+ * 解碼負擔的代理指標:**目前實際在播的**那個來源的像素數。
+ *
+ * 不能用 clip.width/height —— 那是原檔尺寸。預覽換成 540p 代理檔之後,
+ * 4K 原檔的那支其實變成最輕的,用原檔尺寸會把它選成主控,
+ * 結果讓另一支(還在播原檔的)被反覆校正而一直頓。
+ * 元素還沒載入、量不到時才退回原檔尺寸;都量不到當成 0,寧可不要搶主控。
+ */
+function decodeCost(el: HTMLVideoElement | null, clip: Clip | null): number {
+  if (el && el.videoWidth > 0) return el.videoWidth * el.videoHeight
   return clip ? (clip.width ?? 0) * (clip.height ?? 0) : 0
 }
 
